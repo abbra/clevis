@@ -95,6 +95,7 @@ if luksmeta_data.get('OLD_CRYPTSETUP') == '0'
     test('list-recursive-luks2', find_program('list-recursive-luks2'), env: env, timeout: 60)
     test('list-tang-luks2', find_program('list-tang-luks2'), env: env, timeout: 60)
     test('list-sss-tang-luks2', find_program('list-sss-tang-luks2'), env: env, timeout: 60)
+    test('list-regen-kuipa-luks2', find_program('list-regen-kuipa-luks2'), env: env, timeout: 90)
     test('list-multiple-slots-luks2', find_program('list-multiple-slots-luks2'), env: env, timeout: 60)
   endif
 

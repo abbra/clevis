@@ -221,6 +221,21 @@ clevis_luks_print_pin_config() {
         pin=${pin/#,/}
         printf "tpm2 '{%s}'" "${pin}"
         ;;
+    kuipa)
+        # The pin from kuipa (post-quantum Tang). Its header also holds the
+        # binding, which is not configuration: only url, thp and ca are
+        # passed back to the pin, e.g. by clevis luks regen.
+        local key
+        local value
+        for key in 'url' 'thp' 'ca'; do
+            if value=$(jose fmt -j- -g "${key}" -u- <<< "${content}"); then
+                pin=$(printf '%s,"%s":"%s"' "${pin}" "${key}" "${value}")
+            fi
+        done
+        # Remove possible leading comma.
+        pin=${pin/#,/}
+        printf "kuipa '{%s}'" "${pin}"
+        ;;
     *)
         printf "unknown pin '%s'" "${P}"
         ;;

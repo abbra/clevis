@@ -1,0 +1,103 @@
+#!/bin/bash -ex
+# vim: set tabstop=8 shiftwidth=4 softtabstop=4 expandtab smarttab colorcolumn=80:
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# clevis luks list and regen with the kuipa pin. The pin is not
+# part of Clevis, so a stub stands in for it: it stores the url, thp and an
+# opaque binding in the JWE header like the real one, and encrypts with a
+# key in a file.
+
+TEST=$(basename "${0}")
+. luks-common-test-functions
+
+on_exit() {
+    [ -d "${TMP}" ] && rm -rf "${TMP}"
+}
+
+trap 'on_exit' EXIT
+trap 'exit' ERR
+
+TMP="$(mktemp -d)"
+export STUB_KEY="${TMP}/key.jwk"
+mkdir "${TMP}/bin"
+
+cat > "${TMP}/bin/clevis-encrypt-kuipa" <<'EOF'
+#!/bin/sh
+set -eu
+[ "${1:-}" = '--summary' ] && { echo 'stub kuipa'; exit 0; }
+url="$(jose fmt --json="$1" --object --get url --unquote=-)"
+thp="$(jose fmt --json="$1" --object --get thp --unquote=-)"
+[ -e "${STUB_KEY}" ] || jose jwk gen --input='{"alg":"A256GCM"}' > "${STUB_KEY}"
+jwe=$(printf '{"protected":{"clevis":{"pin":"kuipa","kuipa":{"url":"%s","thp":"%s","binding":"%s"}}}}' \
+      "${url}" "${thp}" "$(head -c 12 /dev/urandom | base64)")
+( printf '%s' "${jwe}$(cat "${STUB_KEY}")" ; cat ) | \
+    exec jose jwe enc --input=- --key=- --detached=- --compact
+EOF
+
+cat > "${TMP}/bin/clevis-decrypt-kuipa" <<'EOF'
+#!/bin/sh
+set -eu
+read -d . hdr64
+( printf '%s' "$(cat "${STUB_KEY}")${hdr64}." ; cat ) | \
+    exec jose jwe dec --key=- --input=-
+EOF
+chmod +x "${TMP}/bin/"*
+export PATH="${TMP}/bin:${PATH}"
+
+PIN="kuipa"
+CFG='{"url":"https://ipa.example.test/ipa/ku/tang","thp":"A1b2C3"}'
+
+DEV="${TMP}/luks2-device"
+new_device "luks2" "${DEV}"
+
+if ! clevis luks bind -f -d "${DEV}" "${PIN}" "${CFG}" <<< "${DEFAULT_PASS}"; then
+    error "${TEST}: binding is expected to succeed."
+fi
+
+SLT=1
+if ! read -r slot pin cfg < <(clevis luks list -d "${DEV}" -s "${SLT}"); then
+    error "${TEST}: clevis luks list is expected to succeed."
+fi
+
+if [[ "${slot}" != "${SLT}:" ]] || [[ "${pin}" != "${PIN}" ]]; then
+    error "${TEST}: slot (${slot}) and pin (${pin}) are expected to be ${SLT}: and ${PIN}."
+fi
+
+# The binding is not configuration: only url and thp come back.
+if ! pin_cfg_equal "${cfg}" "${CFG}"; then
+    error "${TEST}: config from clevis luks list (${cfg}) is expected to be ${CFG}."
+fi
+
+if ! read -r slot pins < <(clevis luks list -d "${DEV}" -s "${SLT}" -p); then
+    error "${TEST}: clevis luks list -p is expected to succeed."
+fi
+
+if [[ "${pins}" != "${PIN}" ]]; then
+    error "${TEST}: used pins (${pins}) are expected to be '${PIN}'."
+fi
+
+before="$(cryptsetup luksDump --dump-json-metadata "${DEV}" | jq -r '.tokens[].jwe.protected')"
+if ! clevis luks regen -q -d "${DEV}" -s "${SLT}"; then
+    error "${TEST}: clevis luks regen is expected to succeed."
+fi
+after="$(cryptsetup luksDump --dump-json-metadata "${DEV}" | jq -r '.tokens[].jwe.protected')"
+if [ "${before}" = "${after}" ]; then
+    error "${TEST}: regen is expected to make a new binding."
+fi
+
+read -r slot pin cfg < <(clevis luks list -d "${DEV}" -s "${SLT}")
+if ! pin_cfg_equal "${cfg}" "${CFG}"; then
+    error "${TEST}: config after regen (${cfg}) is expected to be ${CFG}."
+fi
